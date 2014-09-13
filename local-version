@@ -1,0 +1,203 @@
+#!/bin/bash
+
+#Finds out how long it should start collecting songs from, if the user didn't enter then it doesn't know
+if [ $# -ne 1 ]; then
+	echo "Usage $0: Please enter how long you've been listening to music" 1>&2
+	exit 1;
+fi
+
+#Creates temporary files for output
+tout_file=$(mktemp -t /)
+out_file=$(mktemp -t /)
+song_file=$(mktemp -t /)
+
+#Used to say if last part of song captured was accepted
+#If so then would allow said song to pass
+prev=false
+
+#Used as a boolean to see if data file
+data=false
+
+#Find all the files largers than 100Kb (b/c of ending of song might be small) and in the user time zone 
+#and outputs it to a file
+find . -size +100k -mmin -$1 -exec ls -ls {} + | awk '{print $10}' > $tout_file
+#find "$CHROME_MEDIA" -size +100k -mmin -$1 -exec ls -ls {} + | awk '{print $10"\\ "$11}' >> $tout_file
+
+#Progress report
+echo "Progress: 15%"
+
+SAVE_IFS=$IFS
+IFS=$'\n'
+
+#Currently have bug with for loop reading in word by word so it breaks after Cache (Google Chrome)
+for check in `cat $tout_file`; do
+
+        #Does a double check to see whether something could possible be converted to audio files
+        #Based on trial and error, google likes to protect the files
+        file_check=$(file $check | awk '{print $2}')
+        echo $file_check
+	exiftool "$check" | egrep "MP3" > /dev/null
+	exif_check=$?
+
+        #If it's a MPEG it could be part of a larger song - send to out_file
+	if [ $file_check == MPEG ]; then
+		echo $check >> $out_file
+		prev=true
+
+        #If it's Audio it's a song unto itself for sure - and has id3 data - send to special song_file
+	elif [ $file_check == Audio ]; then
+		echo $check >> $song_file
+		prev=false
+	
+        #Otherwise check for special cases for long podcast etc.
+	elif [ $file_check == data -o $exif_check -eq 0 -o $file_check = DOS -o $file_check == ACB ]; then
+                #double check file to see if mp3 - figure out how to parse to see if mp3 (for surefire way)
+		#some files are not passing both tests
+                #If it passed the first test send to out_file
+		if [ $exif_check -eq 0 ]; then
+			echo $check >> $out_file
+			prev=true
+		else 
+                       #If it didn't past first test try some more checks to see if we can send to out_file
+			echo $check | egrep "data" > /dev/null
+			if [ $? -eq 0 ]; then 
+				data=true
+			else 
+				data=false
+			fi
+                        #You might be missing a prev=false somewhere in here
+			if [ $data != true ]; then
+				egrep "(.*)LAME3.(.*)(UUUUUU)* (.)(.*)" $check > /dev/null
+				if [ $? -eq 0 ]; then
+					echo $check >> $out_file
+					prev=false
+				elif [ $prev == true ]; then
+					echo $check >> $out_file
+				fi
+			fi
+		fi 
+	else 
+                #Changes to false if song was not accepted into file
+		prev=false
+	fi
+        #Stating progress
+	echo -n "."
+done
+
+cat $out_file
+IFS=$SAVE_IFS
+
+#Used to say if last part of song captured was accepted
+#If so then would allow said song to pass
+prev=false
+
+#Used as a boolean to see if data file
+data=false
+
+echo "."
+echo "Progress: 40%"
+
+#If in special song file then make the file's name all that good stuff
+for song in `cat $song_file`; do
+# used mp3info before
+	title=$(exiftool $song | egrep "Title" | cut -d ' ' -f 29-)
+	artist=$(exiftool $song | egrep "Artist" | cut -d ' ' -f 28-)
+	echo $title
+	echo $artist
+	cp $song "${artist} - ${title}.mp3"
+	cp "${artist} - ${title}.mp3" ~/Music
+	rm "${artist} - ${title}.mp3"
+	echo -n "."
+done
+
+echo "."
+echo "Progress: 60%"
+
+#cat $out_file
+#cmp_file=$(mktemp -t /)
+#find . -size +100k -mmin -1105 -exec ls -ls {} + | awk '{print $10}' > $cmp_file
+#diff $out_file $cmp_file
+
+#: << 'END'
+
+#As stated - the number of songs created
+songs=0
+#The parts of a song created
+parts=0
+
+#Where we store the parts out
+parts_out=$(mktemp -t /)
+#temp_song=$(mktemp -t /)
+
+#For songs that weren't special
+for file in `cat $out_file`; do
+
+        #Check to see if the file contains these lines
+	egrep "(.*)LAME3.(.*)(UUUUUU)* (.)(.*)" $file > /dev/null
+        #If it did continue here
+	if [ $? -eq 0 ]; then
+                #Last file is never MPEG?
+		if [ `file $file | awk '{print $2}'` == MPEG ]; then
+			echo $file >> $parts_out		
+			parts=`expr $parts + 1`
+		else
+			if [ $parts -eq 0 ]; then
+                                #Create a small song
+				cp $file "song${songs}.mp3"
+				cp "song${songs}.mp3" ~/Music
+				rm "song${songs}.mp3"
+                                echo "Created Small Song: No Parts"
+			else
+                                #Runs through the parts and combines them together
+				for part in `cat $parts_out`; do
+                                        #echo $part
+					cat $part >> "song${songs}.mp3"
+				done
+                                #Adds the current file to the song
+				cat $file >> "song${songs}.mp3"
+
+                                #Moves it to the music folder
+				cp "song${songs}.mp3" ~/Music
+				rm "song${songs}.mp3"
+
+                                #Reset the parts out file
+				parts_out=$(mktemp -t /)
+
+                                #Not really sure
+				temp_song=$(mktemp -t /)
+                                echo "Created Large Song"
+			fi
+                        #Adds 1 to the number of song created
+			songs=`expr $songs + 1`
+		fi
+        #If not add the parts the the parts file to be added to a song later
+	else
+		#temp${parts}=file
+		echo $file >> $parts_out
+		parts=`expr $parts + 1`
+		echo -n "."
+	fi
+done
+
+#The parts of a song created
+parts=0
+
+#Where we store the parts out
+parts_out=$(mktemp -t /)
+#temp_song=$(mktemp -t /)
+
+#For songs that weren't special
+for file in `cat $fire_out_file`; do
+    #echo $file
+    cp $file $(echo  ~/Music/song${songs}.mp3)
+    #cp "song${songs}.mp3" ~/Music
+    #rm "song${songs}.mp3"
+    songs=`expr $songs + 1`
+    echo "Firefox: Created Small Song: No Parts"
+done
+
+#Completed
+echo "."
+echo "Completed"
+
+#END
